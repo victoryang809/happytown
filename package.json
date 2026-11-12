@@ -1,0 +1,22 @@
+{
+  "name": "happytown",
+  "version": "2.0.0",
+  "description": "HappyTown - a multiplayer classroom review game: answer questions at your own pace to build the tallest house, bomb rivals, raise shields.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/simulate.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "qrcode": "^1.5.4",
+    "socket.io": "^4.8.1"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "socket.io-client": "^4.8.1"
+  }
+}

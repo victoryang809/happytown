@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HappyTown · Host</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🏡</text></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@500;600;700&family=Nunito:wght@600;700;800;900&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body class="host" data-stage="connecting">
+  <div class="host-app">
+    <header class="topbar">
+      <div class="brand"><span class="logo">🏡</span> HappyTown <span class="code-pill" id="pinPill" hidden>PIN <b id="pinTop"></b></span></div>
+      <div class="tb-center">
+        <div class="tb-phase" id="tbPhase">Waiting for players…</div>
+        <div class="timeline" id="timeline"></div>
+      </div>
+      <div class="tb-right">
+        <div class="phase-clock" id="phaseClock" hidden><small id="phaseClockLbl">Phase ends in</small><b id="phaseClockTime">0:00</b></div>
+      </div>
+    </header>
+
+    <main class="stage" id="stage">
+      <div id="town"></div>
+      <div class="banner" id="banner" hidden></div>
+
+      <section class="lobby-card" id="lobby" hidden>
+        <div>
+          <h2>Join on your phone 📱</h2>
+          <div class="join-url" id="joinUrl">…</div>
+        </div>
+        <div>
+          <div class="join-code-label">Game PIN</div>
+          <div class="join-code" id="joinCode">····</div>
+        </div>
+        <div class="qr"><img id="qr" alt="QR code to join"></div>
+        <div class="lobby-count"><b id="lobbyCount">0</b> <span id="lobbyCountLbl">players in town</span></div>
+        <div class="lobby-names" id="lobbyNames"></div>
+        <div class="lobby-actions">
+          <button class="btn big green" id="startBtn" disabled>▶ Start game</button>
+        </div>
+        <div class="lobby-actions">
+          <button class="btn small ghost" data-open="game">⚙️ Settings</button>
+          <button class="btn small ghost" data-open="questions">📚 Questions</button>
+          <button class="btn small ghost" data-open="rules">💣 Damage</button>
+          <button class="btn small ghost" id="botBtn">🤖 Add bot</button>
+          <button class="btn small ghost" data-open="players">👥 Players</button>
+        </div>
+        <p class="lobby-hint" id="bankInfo"></p>
+        <p class="lobby-hint">Tip: press <b>A</b> at any time for the admin panel (pause, players, questions, log). Add 🤖 bots to test on your own.</p>
+      </section>
+
+      <div class="overlay" id="intro" hidden></div>
+      <div class="overlay finale" id="finale" hidden>
+        <canvas id="fireworks"></canvas>
+        <div class="finale-content" id="finaleContent"></div>
+      </div>
+    </main>
+
+    <footer class="bottombar" id="bottombar" hidden>
+      <div class="news"><span class="news-lbl">📰 Town news</span><div class="news-items" id="feed"></div></div>
+      <div class="hint-keys">Admin: <kbd>A</kbd> · Pause: <kbd>P</kbd></div>
+    </footer>
+  </div>
+
+  <button class="admin-fab" id="adminFab" title="Admin panel (A)">⚙</button>
+
+  <aside class="admin" id="admin" hidden>
+    <div class="admin-head">
+      <b>Admin</b>
+      <div class="admin-tabs" id="adminTabs">
+        <button data-tab="game" class="on">🎮 Game</button>
+        <button data-tab="players">👥 Players</button>
+        <button data-tab="questions">📚 Questions</button>
+        <button data-tab="rules">💣 Damage</button>
+        <button data-tab="log">🧾 Event log</button>
+      </div>
+      <button class="admin-close" id="adminClose" title="Close (Esc)">✕</button>
+    </div>
+    <div class="admin-body">
+      <!-- Game -->
+      <div data-panel="game">
+        <div class="admin-sec">
+          <h3>Controls</h3>
+          <div class="admin-btns">
+            <button class="btn small" id="pauseBtn">⏸ Pause</button>
+            <button class="btn small blue" id="skipBtn">⏭ Skip</button>
+            <button class="btn small red" id="endBtn">⏹ End game</button>
+            <button class="btn small ghost" id="soundBtn">🔊 Sound on</button>
+            <button class="btn small ghost" id="fsBtn">⛶ Full screen</button>
+            <button class="btn small ghost" id="lobbyBtn">↩ Back to lobby</button>
+            <button class="btn small ghost" id="newRoomBtn">🆕 New room</button>
+          </div>
+          <p class="note" id="skipNote" style="margin-top:10px"></p>
+        </div>
+        <div class="admin-sec">
+          <h3>Settings</h3>
+          <form class="set-grid" id="settingsForm">
+            <h4>Phase timers</h4>
+            <label for="sP1">Phase 1 · Warm-up <small>minutes</small></label><input type="number" step="0.5" min="0.5" max="30" id="sP1">
+            <label for="sP2">Phase 2 · Interaction <small>minutes</small></label><input type="number" step="0.5" min="0.5" max="30" id="sP2">
+            <label for="sP3">Phase 3 · Tactics <small>minutes</small></label><input type="number" step="0.5" min="0.5" max="30" id="sP3">
+            <label for="sFin">Finale <small>seconds</small></label><input type="number" min="5" max="600" id="sFin">
+            <label for="sIntro">Rules screen before each phase <small>seconds (0 = none)</small></label><input type="number" min="0" max="120" id="sIntro">
+            <h4>Questions</h4>
+            <label for="sQ1">Time per question, Phase 1 <small>seconds</small></label><input type="number" min="5" max="120" id="sQ1">
+            <label for="sQ2">Time per question, Phases 2–3 <small>seconds</small></label><input type="number" min="5" max="120" id="sQ2">
+            <label for="sWrong">Show the right answer after a miss <small>seconds</small></label><input type="number" min="0" max="15" id="sWrong">
+            <label for="sShuffle">Shuffle answer options</label><input type="checkbox" id="sShuffle" style="width:22px;height:22px">
+            <label for="sMix">Mix all questions in every phase <small>Off: Phase 1 uses the Easy questions, Phases 2–3 the Hard ones</small></label><input type="checkbox" id="sMix" style="width:22px;height:22px">
+            <h4>Bombs</h4>
+            <label for="sThrow">Throw window <small>seconds (+2 s per Mini Bomb)</small></label><input type="number" min="2" max="30" id="sThrow">
+            <label for="sChoose">Phase 3 Shield / Mega choice <small>seconds</small></label><input type="number" min="2" max="30" id="sChoose">
+            <h4>Maximum per player</h4>
+            <label for="sC1">Phase 1 questions</label><input type="number" min="1" max="500" id="sC1">
+            <label for="sC2">Phase 2 sets</label><input type="number" min="1" max="200" id="sC2">
+            <label for="sC3">Phase 3 sets</label><input type="number" min="1" max="200" id="sC3">
+          </form>
+          <div class="admin-btns" style="margin-top:12px"><button class="btn small green" id="saveSettings">Save settings</button><button class="btn small ghost" id="defaultSettings">Reset to defaults</button></div>
+        </div>
+      </div>
+
+      <!-- Players -->
+      <div data-panel="players" hidden>
+        <div class="admin-sec">
+          <h3>Players <span id="pCount"></span></h3>
+          <p class="note">A student who lost connection scans the QR code again and joins with the <b>same Student ID</b>: their house and floors come back. If their old phone still holds the seat (it shows 🟢 but is frozen), press <b>Reset</b> first.</p>
+          <table class="ptable"><thead><tr><th></th><th>Name</th><th>Student ID</th><th>Status</th><th>🏢</th><th>✅</th><th></th></tr></thead><tbody id="pRows"></tbody></table>
+        </div>
+      </div>
+
+      <!-- Questions -->
+      <div data-panel="questions" hidden>
+        <div class="admin-sec">
+          <h3>Fix or add a question</h3>
+          <p class="note">Edits apply straight away, even during the game (a student looking at that question sees the fix).</p>
+          <div class="q-tools">
+            <input id="qSearch" placeholder="Search questions…">
+            <select id="qFilter"><option value="">All</option><option value="easy">Easy (Phase 1)</option><option value="hard">Hard (Phases 2–3)</option></select>
+            <button class="btn small green" id="qAdd">➕ New</button>
+          </div>
+          <div id="qEditor"></div>
+          <div class="q-list" id="qList"></div>
+        </div>
+        <div class="admin-sec bulk">
+          <h3>Spreadsheet import / export</h3>
+          <p class="note">Copy your sheet in Excel or Google Sheets <b>including the header row</b> and paste it here. The columns are found by their names: <b>Question</b>, <b>Option A–D</b>, <b>Correct</b> (A–D or the answer text), and optional <b>Explanation</b> and <b>Level</b>/<b>Phase</b> (Easy/Hard, or Phase 1 / Phase 2 &amp; 3). Extra columns such as No. or Topic are ignored, so the HappyTown_Questions.xlsx layout works as it is. Replacing the whole bank is only possible before or after a game.</p>
+          <textarea id="bulkText" spellcheck="false" placeholder="Click “Load current bank” to see the format."></textarea>
+          <div class="status" id="bulkStatus"></div>
+          <div class="admin-btns" style="margin-top:8px">
+            <button class="btn small ghost" id="bulkLoad">⬇ Load current bank</button>
+            <button class="btn small ghost" id="bulkCopy">📋 Copy all</button>
+            <button class="btn small green" id="bulkReplace">Replace bank with these</button>
+            <button class="btn small ghost" id="bulkDefault">↺ Default bank</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Damage & floors -->
+      <div data-panel="rules" hidden>
+        <div class="admin-sec">
+          <h3>💣 Damage, shields and floors</h3>
+          <p class="note">Changes apply straight away, even during a game. Bombs that players are holding follow the new numbers;
+            shields that are already up keep their strength. The rules screens and phones show the new numbers.</p>
+          <form class="set-grid" id="rulesForm">
+            <h4>🌱 Phase 1</h4>
+            <label for="rP1Floor">Floors per correct answer</label><input type="number" min="0" max="20" id="rP1Floor">
+            <h4>⚡ Phase 2</h4>
+            <label for="rP2Floor">Floors for 2/3 or 3/3 correct</label><input type="number" min="0" max="20" id="rP2Floor">
+            <label for="rP2Dmg">Bomb damage <small>floors destroyed by a new bomb</small></label><input type="number" min="1" max="50" id="rP2Dmg">
+            <label for="rP2Step">Extra damage each time it is held <small>added after every further perfect set</small></label><input type="number" min="0" max="20" id="rP2Step">
+            <label for="rP2Max">Bomb levels <small>1 = cannot be charged</small></label><input type="number" min="1" max="5" id="rP2Max">
+            <p class="rule-preview" id="rP2Prev"></p>
+            <h4>♟️ Phase 3</h4>
+            <label for="rP3Floor">Floors for 2/3 or 3/3 correct</label><input type="number" min="0" max="20" id="rP3Floor">
+            <label for="rP3Mega">Mega Bomb damage</label><input type="number" min="1" max="50" id="rP3Mega">
+            <label for="rP3Mini">Mini Bomb damage <small>when it first appears</small></label><input type="number" min="1" max="50" id="rP3Mini">
+            <label for="rP3MiniStep">Extra Mini damage each time it is held</label><input type="number" min="0" max="20" id="rP3MiniStep">
+            <label for="rP3MiniMax">Mini Bomb levels</label><input type="number" min="1" max="5" id="rP3MiniMax">
+            <label for="rP3Shield">Shield blocks up to <small>floors of the next bomb, then it disappears</small></label><input type="number" min="1" max="50" id="rP3Shield">
+            <p class="rule-preview" id="rP3Prev"></p>
+          </form>
+          <div class="admin-btns" style="margin-top:12px"><button class="btn small green" id="saveRules">Save damage &amp; floors</button><button class="btn small ghost" id="defaultRules">Reset to defaults</button></div>
+        </div>
+      </div>
+
+      <!-- Log -->
+      <div data-panel="log" hidden>
+        <div class="admin-sec">
+          <h3>Event log</h3>
+          <p class="note">Every change goes through one queue and is applied in order (<b>#</b> = queue number). When two bombs hit the same house at the same moment, the second one starts from the floors the first one left. Nothing is overwritten.</p>
+          <label class="toggle"><input type="checkbox" id="logCombat"> Bombs and shields only</label>
+          <ul class="log-list" id="logList" style="margin-top:8px"></ul>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/js/common.js"></script>
+  <script src="/js/town.js"></script>
+  <script src="/js/host.js"></script>
+</body>
+</html>
