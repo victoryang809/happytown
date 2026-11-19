@@ -3,8 +3,8 @@
  * HappyTown v2 — game server
  *
  * - Players answer at their own pace (asynchronous). The host display is updated in real time.
- * - Three timed phases (3 / 5 / 6 minutes by default), an 8-second rules screen before each,
- *   then a 1-minute finale.
+ * - Three timed phases (2 / 5 / 6 minutes by default), an 8-second rules screen before each,
+ *   then the Final Revenge (about 2 minutes, see below) and a 1-minute finale.
  * - Race conditions: every action that changes the game (answers, bombs, shields, timeouts,
  *   joins, kicks) goes through ONE first-in-first-out queue per room and is applied while the
  *   room is locked (see enqueue()). Two bombs that arrive in the same millisecond are applied
@@ -18,6 +18,19 @@ const crypto = require('crypto');
 const QRCode = require('qrcode');
 const { Server } = require('socket.io');
 const DEFAULT_QUESTIONS = require('./questions');
+// Quick questions for the Final Revenge duels. If reflex.js was not uploaded, simple sums keep the game going.
+let makeReflex;
+try {
+  ({ makeReflex } = require('./reflex'));
+} catch (e) {
+  console.warn('⚠️  reflex.js is missing: the Final Revenge duels will use simple sums. Upload reflex.js to get all question types.');
+  makeReflex = () => {
+    const a = 2 + Math.floor(Math.random() * 8);
+    const b = 2 + Math.floor(Math.random() * 8);
+    const options = [a + b, a + b + 1, a + b - 1, a + b + 2].sort(() => Math.random() - 0.5);
+    return { text: `${a} + ${b} = ?`, options: options.map(String), answer: options.indexOf(a + b), kind: 'math' };
+  };
+}
 
 const PORT = Number(process.env.PORT) || 3000;
 const MAX_PLAYERS = 60;
@@ -28,7 +41,7 @@ const SET_SIZE = 3;
 const DEFAULT_SETTINGS = {
   p1Sec: 120, p2Sec: 300, p3Sec: 360, finaleSec: 60, introSec: 8,
   p1QSec: 15, setQSec: 20, wrongSec: 3, throwSec: 5, chooseSec: 5,
-  p1Cap: 18, p2Cap: 9, p3Cap: 10, shuffle: true, mix: true
+  p1Cap: 18, p2Cap: 9, p3Cap: 10, shuffle: true, mix: true, revenge: true
 };
 const SETTING_LIMITS = {
   p1Sec: [10, 1800], p2Sec: [10, 1800], p3Sec: [10, 1800], finaleSec: [5, 600], introSec: [0, 120],
@@ -180,7 +193,8 @@ function createRoom(settings, bank, rules) {
     customBank: !!custom,
     bank: [], qById: new Map(), nextQid: 1,
     players: new Map(), bySid: new Map(),
-    stage: 'lobby', // lobby | intro | play | finale | ended
+    stage: 'lobby', // lobby | intro | play | revenge | finale | ended
+    rv: null, // Final Revenge state
     phase: 0,
     deadline: 0,
     gameStartV: 0,
@@ -277,6 +291,7 @@ function apply(room, a) {
     }
     case 'stageEnd': {
       if (a.stage !== room.stage || a.phase !== room.phase) return null;
+      if (room.stage === 'revenge' && (!room.rv || a.key !== room.rv.key)) return null; // that step is already over
       advanceStage(room);
       return null;
     }
@@ -288,7 +303,7 @@ function apply(room, a) {
     }
     case 'skip': {
       if (room.paused) resume(room);
-      if (['intro', 'play', 'finale'].includes(room.stage)) advanceStage(room);
+      if (['intro', 'play', 'revenge', 'finale'].includes(room.stage)) advanceStage(room);
       return { ok: true };
     }
     case 'pause': {
@@ -298,8 +313,30 @@ function apply(room, a) {
     case 'endGame': {
       if (room.paused) resume(room);
       if (room.stage === 'intro' || room.stage === 'play') { stopPlayers(room, 'gameEnd'); goFinale(room); }
+      else if (room.stage === 'revenge') { log(room, '⏹ The host ended the Final Revenge', 'admin'); rvFinish(room); }
       else if (room.stage === 'finale') goEnded(room);
       return { ok: true };
+    }
+    // ---- Final Revenge ----
+    case 'rvPick': {
+      if (!p || room.paused) return fail('not_now');
+      const err = rvPick(room, p, a.targetId, false);
+      return err ? fail(err) : { ok: true };
+    }
+    case 'rvAnswer': {
+      if (!p || room.paused) return fail('not_now');
+      return rvAnswer(room, p, a.choice, a.key);
+    }
+    case 'rvSpin': {
+      const rv = room.rv;
+      if (!p || room.paused || room.stage !== 'revenge' || !rv || rv.step !== 'spin' || !rv.spin || rv.spin.by !== p.id) return fail('not_now');
+      rvDoSpin(room, false);
+      return { ok: true };
+    }
+    case 'rvBot': {
+      if (!p || !p.isBot || room.stage !== 'revenge' || !room.rv || a.key !== room.rv.key) return null;
+      rvBot(room, p);
+      return null;
     }
     case 'lobby': {
       backToLobby(room);
@@ -365,18 +402,22 @@ function tick(room) {
   }
   const actions = [];
   if (room.deadline && t >= room.deadline) {
-    actions.push({ type: 'stageEnd', stage: room.stage, phase: room.phase });
+    actions.push({ type: 'stageEnd', stage: room.stage, phase: room.phase, key: room.rv ? room.rv.key : 0 });
   } else if (room.stage === 'play') {
     for (const p of room.players.values()) {
       if (p.deadline && t >= p.deadline + (GRACE[p.mode] || 0)) actions.push({ type: 'timeout', pid: p.id, key: p.key });
       else if (p.isBot && p.botAt && t >= p.botAt) { p.botAt = 0; actions.push({ type: 'bot', pid: p.id, key: p.key }); }
+    }
+  } else if (room.stage === 'revenge' && room.rv) {
+    for (const [pid, at] of Object.entries(room.rv.bots)) {
+      if (at && t >= at) { room.rv.bots[pid] = 0; actions.push({ type: 'rvBot', pid, key: room.rv.key }); }
     }
   }
   for (const a of actions) enqueue(room, a);
 }
 
 function pause(room) {
-  if (room.paused || !['intro', 'play', 'finale'].includes(room.stage)) return;
+  if (room.paused || !['intro', 'play', 'revenge', 'finale'].includes(room.stage)) return;
   room.paused = true;
   room.pausedAt = now();
   log(room, '⏸ Game paused', 'admin');
@@ -396,7 +437,7 @@ function resume(room) {
 // Players
 // ---------------------------------------------------------------------------
 function freshStats() {
-  return { answered: 0, correct: 0, built: 0, destroyed: 0, absorbed: 0, thrown: 0, hits: 0, missed: new Map() };
+  return { answered: 0, correct: 0, built: 0, destroyed: 0, absorbed: 0, thrown: 0, hits: 0, lost: 0, missed: new Map() };
 }
 
 function uniqueName(room, name) {
@@ -470,6 +511,7 @@ function doJoin(room, a) {
       return { ok: true, token: p.token, id: p.id, name: p.name, restored: true, floors: p.floors };
     }
   }
+  if (room.stage === 'revenge') return fail('The game is almost over (Final Revenge). Wait for the host to start a new one.');
   if (room.stage === 'finale' || room.stage === 'ended') return fail('This game has ended. Wait for the host to start a new one.');
   if (room.players.size >= MAX_PLAYERS) return fail('This town is full.');
   const name = cleanText(a.name, 16).replace(/[<>]/g, '');
@@ -791,9 +833,10 @@ function applyDamage(room, from, to, dmg, kind, auto) {
   to.floors -= lost;
   to.stats.absorbed += absorbed;
   to.stats.hits += 1;
+  to.stats.lost += lost;
   from.stats.destroyed += lost;
   from.stats.thrown += 1;
-  const label = kind === 'mega' ? 'Mega Bomb' : kind === 'mini' ? 'Mini Bomb' : 'Bomb';
+  const label = kind === 'mega' ? 'Mega Bomb' : kind === 'mini' ? 'Mini Bomb' : kind === 'crush' ? 'Revenge crush (−80%)' : 'Bomb';
   log(room, `${from.name} → ${to.name}: ${label} (${dmg})${auto ? ' [auto-aimed]' : ''}` +
     (shieldBefore ? ` · shield blocked ${absorbed}, shield gone` : '') +
     ` · floors ${before}→${to.floors}`, 'combat');
@@ -803,9 +846,30 @@ function applyDamage(room, from, to, dmg, kind, auto) {
   });
   // Every hit is stored on the victim, so their phone can always show who bombed them
   // (even if they were offline or busy when it happened).
-  to.hits.push({ id: ev.id, fromName: from.name, fromAvatar: from.avatar, kind, dmg, absorbed, lost, phase: room.phase, t: ev.t });
+  to.hits.push({ id: ev.id, fromName: from.name, fromAvatar: from.avatar, kind, dmg, absorbed, lost, phase: room.phase, rv: room.stage === 'revenge', t: ev.t });
   if (to.hits.length > 40) to.hits.shift();
   dirty(room, to);
+  return ev;
+}
+
+// Final Revenge effects that ignore every shield: the armor-piercing missile and the self-destruct.
+function applyRaw(room, from, to, dmg, kind) {
+  const before = to.floors;
+  const lost = Math.min(to.floors, dmg);
+  const self = from === to;
+  to.floors -= lost;
+  to.stats.lost += lost;
+  if (!self) { to.stats.hits += 1; from.stats.destroyed += lost; from.stats.thrown += 1; }
+  log(room, self ? `🧨 ${to.name} self-destructed · floors ${before}→${to.floors}`
+    : `${from.name} → ${to.name}: ${kind === 'missile' ? '🚀 armor-piercing missile' : 'Revenge crush'} (${dmg}, ignores shields) · floors ${before}→${to.floors}`, 'combat');
+  const ev = pushEvent(room, {
+    type: 'attack', kind, from: from.id, fromName: from.name, fromAvatar: from.avatar, to: to.id, toName: to.name,
+    dmg, absorbed: 0, lost, before, after: to.floors, broke: false, pierce: kind === 'missile', self, auto: false, seq: room.current ? room.current.seq : 0
+  });
+  to.hits.push({ id: ev.id, fromName: from.name, fromAvatar: from.avatar, kind, dmg, absorbed: 0, lost, phase: room.phase, rv: true, self, t: ev.t });
+  if (to.hits.length > 40) to.hits.shift();
+  dirty(room, to);
+  return ev;
 }
 
 function loseWeapons(room, p, reason) {
@@ -849,11 +913,11 @@ function botAct(room, p) {
 }
 
 // ---------------------------------------------------------------------------
-// Stages: lobby → [intro → play] × 3 → finale → ended
+// Stages: lobby → [intro → play] × 3 → revenge (optional) → finale → ended
 // ---------------------------------------------------------------------------
 function startGame(room) {
   for (const p of room.players.values()) resetPlayer(p);
-  Object.assign(room, { final: null, events: [], log: [], qstats: {}, phase: 0, paused: false, pausedAt: 0, pausedTotal: 0, lastTickV: 0 });
+  Object.assign(room, { final: null, rv: null, events: [], log: [], qstats: {}, phase: 0, paused: false, pausedAt: 0, pausedTotal: 0, lastTickV: 0 });
   room.gameStartV = vnow(room);
   log(room, `▶ Game started with ${room.players.size} players`, 'stage');
   goIntro(room, 1);
@@ -890,7 +954,7 @@ function stopPlayers(room, reason) {
   for (const p of room.players.values()) {
     if (p.bomb || p.arsenal) loseWeapons(room, p, reason);
     p.q = null; p.fb = null; p.set = []; p.window = null;
-    if (room.phase === 3 || reason === 'gameEnd') p.shield = null;
+    if (reason === 'gameEnd') p.shield = null; // Phase 3 shields stay up during the Final Revenge
     setMode(room, p, 'idle');
   }
 }
@@ -901,9 +965,11 @@ function advanceStage(room) {
     stopPlayers(room, 'phase');
     log(room, `⏹ Phase ${room.phase} ended`, 'stage');
     if (room.phase < 3) goIntro(room, room.phase + 1);
+    else if (room.settings.revenge) goRevenge(room);
     else goFinale(room);
     return;
   }
+  if (room.stage === 'revenge') { rvAdvance(room); return; }
   if (room.stage === 'finale') goEnded(room);
 }
 
@@ -943,6 +1009,7 @@ function computeFinal(room) {
 }
 
 function goFinale(room) {
+  for (const p of room.players.values()) p.shield = null;
   room.stage = 'finale';
   room.final = computeFinal(room);
   room.deadline = vnow(room) + room.settings.finaleSec * 1000;
@@ -965,11 +1032,307 @@ function backToLobby(room) {
   room.phase = 0;
   room.deadline = 0;
   room.final = null;
+  room.rv = null;
   room.paused = false;
   room.events = [];
   for (const p of room.players.values()) { resetPlayer(p); dirty(room, p); }
   log(room, '↩ Back to the lobby', 'stage');
   pubSoon(room, true);
+}
+
+// ---------------------------------------------------------------------------
+// Final Revenge (after Phase 3, before the finale)
+// The two players at the bottom of the leaderboard ("the Broke Club") and the player bombed most
+// often ("Victim of the Year") each choose one enemy (no two the same). Pair by pair, in random
+// order, avenger and enemy answer one quick reflex question; the fastest right answer spins the wheel:
+//   💥 crush          the enemy loses 80% of their floors (a shield still blocks up to its strength)
+//   🧨 self-destruct  the spinner loses 100% of their own house
+//   🚀 missile        armor-piercing: −10 floors to the enemy, ignoring any shield (20% of the wheel)
+// The show runs on the big screen; the other phones are locked and only watch.
+// ---------------------------------------------------------------------------
+const RV_SCALE = Math.min(3, Math.max(0.05, Number(process.env.HT_RV_SCALE) || 1)); // the tests run it faster
+const RV_MS = {
+  blackout: 3500, reveal: 8500, rules: 6500, // ~18 s of "it's payback time"
+  pick: 15000, picked: 3000,
+  duelIntro: 3500, duel: 7000, duelResult: 3200,
+  spin: 6000, spinning: 5500, effect: 5000,
+  outro: 5500
+};
+const rvMs = (step) => Math.round((RV_MS[step] || 3000) * RV_SCALE);
+const WHEEL = ['crush', 'self', 'crush', 'self', 'missile']; // 5 equal slices: the missile is 20% of the wheel
+const RV_CRUSH = 0.8;
+const RV_MISSILE = 10;
+const TEST_WHEEL = String(process.env.HT_TEST_WHEEL || '').split(',').map((x) => x.trim()).filter((x) => WHEEL.includes(x));
+let testWheelN = 0;
+
+const pick1 = (list) => list[Math.floor(Math.random() * list.length)];
+
+// ---- Who takes revenge ----
+function castEntry(room, p, role) {
+  const rank = [...room.players.values()].filter((o) => o.floors > p.floors).length + 1;
+  const by = new Map();
+  for (const h of p.hits) {
+    if (h.self) continue;
+    const x = by.get(h.fromName) || { name: h.fromName, avatar: h.fromAvatar, n: 0 };
+    x.n += 1;
+    by.set(h.fromName, x);
+  }
+  const fan = [...by.values()].sort((a, b) => b.n - a.n)[0] || null; // the player who bombed them most
+  return {
+    id: p.id, role, rank, floors: p.floors, hits: p.stats.hits, lost: p.stats.lost, built: p.stats.built,
+    correct: p.stats.correct, answered: p.stats.answered, attackers: by.size, fan
+  };
+}
+
+function revengeCast(room) {
+  const all = [...room.players.values()];
+  const k = Math.min(3, Math.floor(all.length / 2)); // every avenger needs a different enemy
+  if (k < 1) return [];
+  // bottom of the leaderboard: fewest floors, then fewest right answers (ties drawn at random)
+  const poorest = shuffle([...all]).sort((a, b) => a.floors - b.floors || a.stats.correct - b.stats.correct);
+  const broke = poorest.slice(0, Math.min(2, k));
+  const taken = new Set(broke.map((p) => p.id));
+  const cast = broke.map((p) => castEntry(room, p, 'broke'));
+  if (k >= 3) {
+    const rest = shuffle(all.filter((p) => !taken.has(p.id))).sort((a, b) => b.stats.hits - a.stats.hits || b.stats.lost - a.stats.lost);
+    // nobody else was ever bombed: the next poorest takes the seat
+    const v = rest[0] && rest[0].stats.hits > 0 ? rest[0] : poorest.find((p) => !taken.has(p.id));
+    if (v) cast.push(castEntry(room, v, 'victim'));
+  }
+  return cast;
+}
+
+const rvIsCast = (room, id) => room.rv.cast.some((c) => c.id === id);
+const rvPair = (room) => (room.rv.idx >= 0 && room.rv.idx < room.rv.pairs.length ? room.rv.pairs[room.rv.idx] : null);
+function rvFreeTargets(room) {
+  const taken = new Set(Object.values(room.rv.picks).map((x) => x.targetId));
+  return [...room.players.values()].filter((p) => !rvIsCast(room, p.id) && !taken.has(p.id));
+}
+const botAt = (room, lo, hi) => vnow(room) + rand(lo, hi) * RV_SCALE;
+
+function goRevenge(room) {
+  const cast = revengeCast(room);
+  if (!cast.length) { goFinale(room); return; }
+  room.stage = 'revenge';
+  room.rv = { key: 0, step: '', at: 0, cast, picks: {}, pairs: [], idx: -1, duel: null, spin: null, bots: {} };
+  const role = (c) => (c.role === 'broke' ? 'Broke Club' : 'Victim of the Year');
+  log(room, `💀 Final Revenge! ${cast.map((c) => `${room.players.get(c.id).name} (${role(c)})`).join(', ')}`, 'stage');
+  pushEvent(room, { type: 'revenge', cast: cast.map((c) => c.id) });
+  rvStep(room, 'blackout');
+}
+
+// Every step has its own key, so a late timer or a late tap can never act on the next step.
+function rvStep(room, step) {
+  const rv = room.rv;
+  rv.step = step;
+  rv.key += 1;
+  rv.at = vnow(room);
+  rv.bots = {};
+  room.deadline = rv.at + rvMs(step);
+  pubSoon(room, true);
+}
+
+function rvAdvance(room) {
+  switch (room.rv.step) {
+    case 'blackout': rvStep(room, 'reveal'); break;
+    case 'reveal': rvStep(room, 'rules'); break;
+    case 'rules': rvStartPick(room); break;
+    case 'pick': rvFinishPick(room); break;
+    case 'picked': rvNextPair(room); break;
+    case 'duelIntro': rvStartDuel(room, 1); break;
+    case 'duel': rvEndDuel(room); break;
+    case 'duelResult': rvAfterDuel(room); break;
+    case 'spin': rvDoSpin(room, true); break;
+    case 'spinning': rvApplyEffect(room); break;
+    case 'effect': rvNextPair(room); break;
+    default: rvFinish(room);
+  }
+}
+
+function rvStartPick(room) {
+  rvStep(room, 'pick');
+  for (const c of room.rv.cast) {
+    const p = room.players.get(c.id);
+    if (p && p.isBot) room.rv.bots[p.id] = botAt(room, 2500, 8000);
+  }
+}
+
+function rvPick(room, p, targetId, auto) {
+  const rv = room.rv;
+  if (room.stage !== 'revenge' || !rv || rv.step !== 'pick') return 'not_now';
+  if (!rvIsCast(room, p.id)) return 'not_avenger';
+  if (rv.picks[p.id]) return 'already_picked';
+  const t = room.players.get(targetId);
+  if (!t || rvIsCast(room, t.id)) return 'bad_target';
+  if (Object.values(rv.picks).some((x) => x.targetId === t.id)) return 'taken';
+  rv.picks[p.id] = { targetId: t.id, auto: !!auto };
+  log(room, `🎯 ${p.name} chose ${t.name} for revenge${auto ? ' (time ran out: the tallest house left)' : ''}`, 'combat');
+  pushEvent(room, { type: 'rvPick', from: p.id, fromName: p.name, fromAvatar: p.avatar, to: t.id, toName: t.name, auto: !!auto });
+  // everyone has chosen: a short pause so the big screen shows the last choice
+  if (rv.cast.every((c) => rv.picks[c.id] || !room.players.has(c.id))) room.deadline = Math.min(room.deadline, vnow(room) + 1500 * RV_SCALE);
+  pubSoon(room, true);
+  return null;
+}
+
+function rvFinishPick(room) {
+  const rv = room.rv;
+  for (const c of rv.cast) {
+    const p = room.players.get(c.id);
+    if (!p || rv.picks[c.id]) continue;
+    const t = rvFreeTargets(room).sort((a, b) => b.floors - a.floors)[0]; // no choice in time: the tallest house left
+    if (t) rvPick(room, p, t.id, true);
+  }
+  rv.pairs = shuffle(rv.cast.filter((c) => rv.picks[c.id] && room.players.has(c.id) && room.players.has(rv.picks[c.id].targetId))
+    .map((c) => ({ a: c.id, t: rv.picks[c.id].targetId, res: null })));
+  rvStep(room, 'picked');
+}
+
+function rvNextPair(room) {
+  const rv = room.rv;
+  rv.duel = null;
+  rv.spin = null;
+  while (++rv.idx < rv.pairs.length) {
+    const pr = rv.pairs[rv.idx];
+    if (room.players.has(pr.a) && room.players.has(pr.t)) { rvStep(room, 'duelIntro'); return; }
+    pr.res = { skipped: true };
+  }
+  rv.idx = rv.pairs.length;
+  rvStep(room, 'outro');
+}
+
+function rvStartDuel(room, round) {
+  const rv = room.rv;
+  const pr = rvPair(room);
+  rv.duel = { round, q: makeReflex(rv.duel ? rv.duel.q.text : ''), answers: {}, winner: null, done: false, startAt: 0 };
+  rvStep(room, 'duel');
+  rv.duel.startAt = rv.at;
+  for (const id of [pr.a, pr.t]) {
+    const p = room.players.get(id);
+    if (p && p.isBot) rv.bots[id] = botAt(room, 1200, 5200);
+  }
+}
+
+// The first RIGHT answer wins straight away. A wrong answer is out, but the other player can still win.
+function rvAnswer(room, p, choice, key) {
+  const rv = room.rv;
+  if (room.stage !== 'revenge' || !rv || rv.step !== 'duel' || !rv.duel || rv.duel.done) return fail('not_now');
+  if (key !== undefined && key !== rv.key) return fail('stale');
+  const pr = rvPair(room);
+  if (!pr || (p.id !== pr.a && p.id !== pr.t)) return fail('not_in_duel');
+  const d = rv.duel;
+  if (d.answers[p.id]) return fail('already_answered');
+  const c = Number(choice);
+  if (!Number.isInteger(c) || c < 0 || c >= d.q.options.length) return fail('bad_choice');
+  const ms = Math.max(0, vnow(room) - d.startAt);
+  const correct = c === d.q.answer;
+  d.answers[p.id] = { choice: c, ms, correct };
+  log(room, `⚡ ${p.name}: ${correct ? 'right' : 'wrong'} in ${(ms / 1000).toFixed(2)} s`, 'combat');
+  if (correct) { d.winner = p.id; rvEndDuel(room); }
+  else if (d.answers[pr.a] && d.answers[pr.t]) rvEndDuel(room);
+  else pubSoon(room, true);
+  return { ok: true, correct, ms, answer: d.q.answer };
+}
+
+function rvEndDuel(room) {
+  const d = room.rv.duel;
+  if (!d || d.done) return;
+  d.done = true;
+  if (d.winner) log(room, `🏆 ${room.players.get(d.winner).name} wins the duel and spins the wheel`, 'combat');
+  else log(room, d.round === 1 ? '🤷 Nobody got it right: sudden death!' : '🕊️ Nobody got it right again: no revenge this time', 'combat');
+  rvStep(room, 'duelResult');
+}
+
+function rvAfterDuel(room) {
+  const rv = room.rv;
+  const pr = rvPair(room);
+  const d = rv.duel;
+  if (d && d.winner && room.players.has(d.winner)) { rvStartSpin(room); return; }
+  if (d && !d.winner && d.round === 1) { rvStartDuel(room, 2); return; } // sudden death: one more question
+  if (pr) pr.res = { peace: true };
+  rvNextPair(room);
+}
+
+function rvStartSpin(room) {
+  const rv = room.rv;
+  const pr = rvPair(room);
+  const by = rv.duel.winner;
+  rv.spin = { by, other: by === pr.a ? pr.t : pr.a, slice: -1, outcome: null, offset: 0.5, auto: false };
+  rvStep(room, 'spin');
+  const p = room.players.get(by);
+  if (p && p.isBot) rv.bots[by] = botAt(room, 900, 2600);
+}
+
+function rvDoSpin(room, auto) {
+  const s = room.rv.spin;
+  if (!s || s.outcome) return;
+  let slice = Math.floor(Math.random() * WHEEL.length);
+  if (TEST_WHEEL.length) { // test seam: HT_TEST_WHEEL=missile,self,crush
+    const want = TEST_WHEEL[testWheelN++ % TEST_WHEEL.length];
+    slice = pick1(WHEEL.map((w, i) => (w === want ? i : -1)).filter((i) => i >= 0));
+  }
+  s.slice = slice;
+  s.outcome = WHEEL[slice];
+  s.offset = Math.round(rand(0.2, 0.8) * 100) / 100; // where the pointer stops inside the slice
+  s.auto = !!auto;
+  const p = room.players.get(s.by);
+  log(room, `🎡 ${p ? p.name : '?'} spun the wheel${auto ? ' (automatically)' : ''}: ${{ crush: '💥 −80%', self: '🧨 self-destruct', missile: '🚀 missile' }[s.outcome]}`, 'combat');
+  rvStep(room, 'spinning');
+}
+
+function rvApplyEffect(room) {
+  const rv = room.rv;
+  const pr = rvPair(room);
+  const s = rv.spin;
+  const me = room.players.get(s.by);
+  const foe = room.players.get(s.other);
+  let ev = null;
+  if (me && foe) {
+    if (s.outcome === 'self') ev = applyRaw(room, me, me, me.floors, 'self');
+    else if (s.outcome === 'missile') ev = applyRaw(room, me, foe, RV_MISSILE, 'missile');
+    else if (foe.floors > 0) ev = applyDamage(room, me, foe, Math.max(1, Math.round(foe.floors * RV_CRUSH)), 'crush', false);
+    else ev = applyRaw(room, me, foe, 0, 'crush');
+  }
+  if (pr) {
+    pr.res = ev ? { by: s.by, outcome: s.outcome, victim: ev.to, dmg: ev.dmg, lost: ev.lost, absorbed: ev.absorbed, before: ev.before, after: ev.after }
+      : { by: s.by, outcome: s.outcome, skipped: true };
+  }
+  rvStep(room, 'effect');
+}
+
+function rvBot(room, p) {
+  const rv = room.rv;
+  if (rv.step === 'pick') {
+    const free = rvFreeTargets(room).sort((a, b) => b.floors - a.floors);
+    const t = Math.random() < 0.6 ? free[0] : pick1(free);
+    if (t) rvPick(room, p, t.id, false);
+  } else if (rv.step === 'duel' && rv.duel) {
+    const q = rv.duel.q;
+    const choice = Math.random() < 0.8 ? q.answer : (q.answer + randInt(1, q.options.length - 1)) % q.options.length;
+    rvAnswer(room, p, choice, rv.key);
+  } else if (rv.step === 'spin' && rv.spin && rv.spin.by === p.id) rvDoSpin(room, false);
+}
+
+function rvFinish(room) {
+  if (room.rv) { room.rv.step = 'done'; room.rv.bots = {}; }
+  goFinale(room);
+}
+
+// What every screen sees. The right answer of a duel stays secret until the duel is over.
+function rvView(room) {
+  const rv = room.rv;
+  if (room.stage !== 'revenge' || !rv) return null;
+  const d = rv.duel;
+  return {
+    key: rv.key, step: rv.step, at: rv.at, ms: rvMs(rv.step),
+    cast: rv.cast, picks: rv.picks, pairs: rv.pairs, idx: rv.idx,
+    duel: d ? {
+      round: d.round, text: d.q.text, options: d.q.options, kind: d.q.kind, done: d.done, winner: d.winner,
+      answer: d.done ? d.q.answer : null,
+      answers: Object.fromEntries(Object.entries(d.answers).map(([id, x]) => [id, { ms: x.ms, correct: x.correct, choice: d.done ? x.choice : null }]))
+    } : null,
+    spin: rv.spin,
+    wheel: WHEEL, crush: RV_CRUSH, missile: RV_MISSILE
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1074,6 +1437,7 @@ function publicState(room) {
     rules: room.rules,
     setSize: SET_SIZE,
     players: [...room.players.values()].map((p) => publicPlayer(room, p)),
+    rv: rvView(room),
     final: room.final ? { ranking: room.final.ranking, awards: room.final.awards, accuracy: room.final.accuracy } : null
   };
 }
@@ -1269,6 +1633,9 @@ io.on('connection', (socket) => {
   socket.on('throw', playerAction('throw', (d) => ({ targetId: d.targetId })));
   socket.on('hold', playerAction('hold', () => ({})));
   socket.on('choose', playerAction('choose', (d) => ({ item: d.item })));
+  socket.on('rv:pick', playerAction('rvPick', (d) => ({ targetId: d.targetId })));
+  socket.on('rv:answer', playerAction('rvAnswer', (d) => ({ key: d.key, choice: d.choice })));
+  socket.on('rv:spin', playerAction('rvSpin', () => ({})));
 
   socket.on('disconnect', () => {
     const room = rooms.get(socket.data.roomCode);

@@ -11,6 +11,7 @@
   let adminTab = 'game';
   let bankCache = null;
   let editing = null; // question being edited in the admin panel
+  let revengeSeen = false; // the Final Revenge happened in this game
 
   // -------------------------------------------------------------------------
   // Sound effects (synthesised, no files needed)
@@ -56,7 +57,41 @@
     phase() { [523, 659, 784].forEach((f, i) => this.tone(f, 0.25, 'triangle', 0.12, null, i * 0.12)); },
     drum() { for (let i = 0; i < 10; i++) this.noise(0.08, 0.12, i * 0.09); },
     fanfare() { [523, 659, 784, 1047, 784, 1047].forEach((f, i) => this.tone(f, i === 5 ? 0.7 : 0.2, 'triangle', 0.14, null, i * 0.14)); },
-    firework() { this.noise(0.35, 0.08); }
+    firework() { this.noise(0.35, 0.08); },
+    // ---- Final Revenge ----
+    powerDown() { this.tone(240, 1.5, 'sawtooth', 0.12, 28); this.tone(120, 1.5, 'square', 0.05, 20); this.noise(0.15, 0.3); },
+    thunder() { this.noise(1.9, 0.9); this.tone(70, 1.8, 'sine', 0.35, 28); },
+    dunDun() { [[196, 0.32, 0], [185, 0.32, 0.42], [147, 1.5, 0.84]].forEach(([f, d, t]) => { this.tone(f, d, 'sawtooth', 0.11, null, t); this.tone(f / 2, d, 'square', 0.05, null, t); }); },
+    sadTrombone() { // wah wah wah waaah
+      if (!this.on) return;
+      const c = this.ensure(); if (!c) return;
+      let t = c.currentTime + 0.05;
+      [[392, 0.42], [370, 0.42], [349, 0.42], [330, 1.5]].forEach(([f, d], i) => {
+        const o = c.createOscillator(); const g = c.createGain(); const lp = c.createBiquadFilter();
+        o.type = 'sawtooth'; o.frequency.setValueAtTime(f, t);
+        if (i === 3) {
+          const lfo = c.createOscillator(); const lg = c.createGain();
+          lfo.frequency.value = 6; lg.gain.value = 10; lfo.connect(lg).connect(o.frequency); lfo.start(t); lfo.stop(t + d);
+          o.frequency.linearRampToValueAtTime(f * 0.93, t + d);
+        }
+        lp.type = 'lowpass'; lp.frequency.value = 1300;
+        g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.14, t + 0.05);
+        g.gain.setValueAtTime(0.14, t + d - 0.1); g.gain.exponentialRampToValueAtTime(0.0001, t + d);
+        o.connect(lp).connect(g).connect(c.destination); o.start(t); o.stop(t + d + 0.05);
+        t += d;
+      });
+    },
+    sting() { [110, 131, 156, 208].forEach((f) => this.tone(f, 1.2, 'sawtooth', 0.05)); this.noise(0.35, 0.25); },
+    lock() { this.tone(520, 0.07, 'square', 0.08); this.tone(260, 0.22, 'square', 0.08, null, 0.07); this.noise(0.12, 0.2, 0.05); },
+    beep(hi) { this.tone(hi ? 1320 : 880, hi ? 0.45 : 0.12, 'square', 0.06); },
+    ding() { this.tone(1320, 0.25, 'sine', 0.13); this.tone(1760, 0.45, 'sine', 0.11, null, 0.09); },
+    buzzer() { this.tone(140, 0.55, 'sawtooth', 0.13); this.tone(147, 0.55, 'square', 0.05); },
+    wheelTick() { this.tone(2100, 0.025, 'square', 0.035); },
+    whistle() { this.tone(2200, 1.2, 'sine', 0.07, 350); },
+    missile() { this.tone(160, 1.3, 'sawtooth', 0.06, 1900); this.noise(1.3, 0.14); },
+    fuse() { for (let i = 0; i < 9; i++) this.noise(0.06, 0.08, i * 0.11); this.tone(300, 0.2, 'triangle', 0.08, 900, 1.0); },
+    boing() { this.tone(160, 0.16, 'sine', 0.2, 720); this.tone(720, 0.4, 'sine', 0.18, 140, 0.16); },
+    laugh() { [0, 0.17, 0.34, 0.51, 0.68].forEach((t, i) => this.tone(560 - i * 40, 0.13, 'triangle', 0.13, 420 - i * 30, t)); }
   };
   document.addEventListener('pointerdown', () => Sfx.ensure(), { once: true });
 
@@ -67,6 +102,8 @@
     onBuild: () => Sfx.pop(),
     onImpact: (ev) => { if (ev.lost > 0) Sfx.boom(ev.dmg >= 5); else Sfx.shield(); }
   });
+  // the Final Revenge show (js/revenge-show.js); without that file the rest of the game still works
+  const rvShow = HT.RevengeShow ? HT.RevengeShow($('#revenge'), Sfx) : { render() {}, tick() {}, onEvent() { return false; } };
 
   // -------------------------------------------------------------------------
   // Connection
@@ -106,6 +143,7 @@
     if (S && S.stage === 'ended') renderFinale();
   });
   socket.on('event', (ev) => {
+    if (rvShow.onEvent(ev)) return; // revenge picks and effects play on the revenge screen
     if (ev.type === 'attack') { town.attack(ev); Sfx.whoosh(); }
     if (ev.type === 'shield') { Sfx.shield(); town.floatText(ev.id, '🛡️ Shield up!', 'shield'); }
     if (ev.type === 'fizzle') { Sfx.fizzle(); town.floatText(ev.id, '💨 bomb lost', 'shield'); }
@@ -142,6 +180,8 @@
   const left = () => (S ? HT.left(S.deadline, S.paused, S.vnow) : 0);
 
   function onStageChange(prev) {
+    if (S.stage === 'revenge') { revengeSeen = true; stopFireworks(); }
+    if (S.stage === 'lobby') revengeSeen = false;
     if (S.stage === 'finale') startFinale();
     if (S.stage === 'ended') startFireworks();
     if (S.stage === 'lobby' || S.stage === 'intro') stopFireworks();
@@ -158,6 +198,7 @@
     renderBanner();
     renderFeed();
     renderFinale();
+    rvShow.render(S);
     $('#bottombar').hidden = !['intro', 'play'].includes(S.stage);
     $('#pinPill').hidden = S.stage === 'lobby';
     if (!$('#admin').hidden) renderAdmin(false);
@@ -168,6 +209,7 @@
     const t = $('#tbPhase');
     if (S.stage === 'lobby') t.textContent = 'Waiting for players…';
     else if (S.stage === 'finale' || S.stage === 'ended') t.textContent = '🏆 Finale';
+    else if (S.stage === 'revenge') t.textContent = '💀 Final Revenge';
     else {
       const ph = HT.PHASES[S.phase];
       t.innerHTML = `<span class="chip ${ph.cls}">${ph.icon} Phase ${S.phase}</span> ${esc(ph.name)}`;
@@ -177,6 +219,8 @@
       { cls: 'p1', w: s.p1Sec, label: `Warm-up ${HT.fmtClock(s.p1Sec * 1000)}` },
       { cls: 'p2', w: s.p2Sec, label: `Interaction ${HT.fmtClock(s.p2Sec * 1000)}` },
       { cls: 'p3', w: s.p3Sec, label: `Tactics ${HT.fmtClock(s.p3Sec * 1000)}` },
+      // the revenge is a surprise: the segment says "?" until it starts
+      ...(s.revenge || revengeSeen ? [{ cls: 'rv', w: 100, label: revengeSeen ? '💀 Revenge' : '❓' }] : []),
       { cls: 'fin', w: Math.max(s.finaleSec, 45), label: 'Finale' }
     ];
     const tl = $('#timeline');
@@ -194,13 +238,15 @@
     const s = S.settings;
     // timeline fill
     const segs = $$('#timeline .seg');
-    const curIdx = S.stage === 'finale' || S.stage === 'ended' ? 3 : S.phase - 1;
+    const finIdx = segs.length - 1;
+    const curIdx = S.stage === 'finale' || S.stage === 'ended' ? finIdx : S.stage === 'revenge' ? 3 : S.phase - 1;
     segs.forEach((el, i) => {
       let fill = 0;
       if (S.stage === 'lobby') fill = 0;
-      else if (i < curIdx) fill = 100;
+      else if (i < curIdx) fill = el.classList.contains('rv') && !revengeSeen ? 0 : 100;
       else if (i === curIdx) {
         if (S.stage === 'play') fill = 100 * (1 - ms / ([s.p1Sec, s.p2Sec, s.p3Sec][i] * 1000));
+        else if (S.stage === 'revenge') fill = 100 * rvProgress(S.rv);
         else if (S.stage === 'finale') fill = 100 * (1 - ms / (s.finaleSec * 1000));
         else if (S.stage === 'ended') fill = 100;
       }
@@ -209,9 +255,9 @@
     });
     // big clock
     const pc = $('#phaseClock');
-    const lbl = { intro: `Phase ${S.phase} starts in`, play: `Phase ${S.phase} ends in`, finale: 'Finale', ended: 'Game over' }[S.stage] || '';
+    const lbl = { intro: `Phase ${S.phase} starts in`, play: `Phase ${S.phase} ends in`, revenge: 'Final Revenge', finale: 'Finale', ended: 'Game over' }[S.stage] || '';
     $('#phaseClockLbl').textContent = S.paused ? 'Paused' : lbl;
-    $('#phaseClockTime').textContent = S.stage === 'ended' ? '🏁' : S.paused ? '⏸' : HT.fmtClock(ms);
+    $('#phaseClockTime').textContent = S.stage === 'ended' ? '🏁' : S.stage === 'revenge' ? '💀' : S.paused ? '⏸' : HT.fmtClock(ms);
     const urgent = S.stage === 'play' && !S.paused && ms <= 10000;
     pc.classList.toggle('urgent', urgent);
     const sec = Math.ceil(ms / 1000);
@@ -219,8 +265,20 @@
     const ic = $('#introCount');
     if (ic) ic.textContent = S.paused ? 'Paused' : `Starting in ${sec}s…`;
     if (S.stage === 'finale') finaleStep();
+    if (S.stage === 'revenge') rvShow.tick();
   }
   setInterval(tickTimers, 200);
+
+  // How far the Final Revenge has got (for the timeline): intro and picks, then the duels
+  function rvProgress(rv) {
+    if (!rv) return 0;
+    const pre = ['blackout', 'reveal', 'rules', 'pick', 'picked'].indexOf(rv.step);
+    if (pre >= 0) return ((pre + 1) / 5) * 0.25;
+    if (rv.step === 'outro') return 0.97;
+    const steps = ['duelIntro', 'duel', 'duelResult', 'spin', 'spinning', 'effect'];
+    const j = Math.max(0, steps.indexOf(rv.step));
+    return 0.25 + 0.7 * ((rv.idx + (j + 1) / steps.length) / Math.max(1, rv.pairs.length));
+  }
 
   function renderLobby() {
     const show = S.stage === 'lobby';
@@ -315,9 +373,11 @@
   // -------------------------------------------------------------------------
   let finaleView = '';
   let revealed = 0;
+  let showReview = false; // the question review is optional: the host opens it with a button
   function startFinale() {
     revealed = 0;
     finaleView = '';
+    showReview = false;
     startFireworks();
     Sfx.drum();
   }
@@ -345,7 +405,7 @@
     if (!show) { finaleView = ''; return; }
     const F = (HX && HX.final) || S.final;
     if (!F) return;
-    const view = finaleElapsed() < 12000 ? 'podium' : 'results';
+    const view = finaleElapsed() < 12000 ? 'podium' : showReview ? 'review' : 'results';
     const key = `${view}:${S.stage}:${F.ranking.map((r) => r.id + r.floors).join(',')}:${(HX.final && HX.final.missed || []).length}`;
     if (finaleView === key || (view === 'podium' && finaleView === 'podium')) return;
     finaleView = view === 'podium' ? 'podium' : key;
@@ -368,32 +428,41 @@
       finaleStep();
       return;
     }
-    const aw = F.awards || {};
-    const award = (a, ic, t, unit) => `<div class="award"><div class="ic">${ic}</div><div class="t">${t}</div>
-      <div class="n">${a ? `${esc(a.avatar)} ${esc(a.name)}` : '—'}</div><div class="v">${a ? `${a.value} ${unit}` : ''}</div></div>`;
-    const board = F.ranking.map((r) => `<li><span class="rk">${HT.medal(r.rank)}</span><span class="av">${esc(r.avatar)}</span>
-      <span>${esc(r.name)}</span><span class="acc">${r.correct}/${r.answered} ✓</span><span class="fl">${r.floors} 🏢</span></li>`).join('');
-    const missed = ((HX.final && HX.final.missed) || []).map((m) => `<li><span class="mp">${Math.round((100 * m.wrong) / m.asked)}% missed</span>
-      <div class="mq">${esc(m.q)}</div><div class="ma">✓ ${esc(m.answer)}</div>${m.explain ? `<div class="mx">${esc(m.explain)}</div>` : ''}</li>`).join('');
-    box.innerHTML = `<div class="end-wrap">
-        <div class="end-title"><h1>🏆 The winners of HappyTown!</h1>
-          <div class="end-actions">${S.stage === 'ended' ? '<button class="btn green" id="againBtn">🔁 Play again</button><button class="btn ghost" id="newBtn">🆕 New room</button>' : ''}</div>
-        </div>
-        <div>
-          <div class="mini-podium">${top.map((r) => `<div><span>${HT.medal(r.rank)}</span><span class="av">${esc(r.avatar)}</span><span>${esc(r.name)}</span><span>${r.floors} 🏢</span></div>`).join('')}</div>
+    const actions = `<button class="btn small ${view === 'review' ? 'blue' : 'ghost'}" id="reviewBtn">${view === 'review' ? '🏆 Back to the ranking' : '📚 Review questions <small>(optional)</small>'}</button>` +
+      (S.stage === 'ended' ? '<button class="btn small green" id="againBtn">🔁 Play again</button><button class="btn small ghost" id="newBtn">🆕 New room</button>' : '');
+    if (view === 'review') {
+      const missed = ((HX.final && HX.final.missed) || []).map((m) => `<li><span class="mp">${Math.round((100 * m.wrong) / m.asked)}% missed</span>
+        <div class="mq">${esc(m.q)}</div><div class="ma">✓ ${esc(m.answer)}</div>${m.explain ? `<div class="mx">${esc(m.explain)}</div>` : ''}</li>`).join('');
+      box.innerHTML = `<div class="end-wrap v2 review">
+          <div class="end-title"><div><h1>📚 Let's review</h1><div class="end-meta">The questions the class missed most · class accuracy ${F.accuracy}%</div></div>
+            <div class="end-actions">${actions}</div></div>
+          ${missed ? `<ul class="missed">${missed}</ul>` : '<p class="lobby-hint">Nobody missed a question. Impressive!</p>'}
+        </div>`;
+    } else {
+      // Everyone's rank (so each student finds their place), with the top 3 honoured on top
+      const aw = F.awards || {};
+      const award = (a, ic, t, unit) => `<div class="award"><div class="ic">${ic}</div><div class="t">${t}</div>
+        <div class="n">${a ? `${esc(a.avatar)} ${esc(a.name)}` : '—'}</div><div class="v">${a ? `${a.value} ${unit}` : ''}</div></div>`;
+      const hof = (r) => (r ? `<div class="hof r${Math.min(3, r.rank)}" style="--c:${r.color}">${r.rank === 1 ? '<div class="crown">👑</div>' : ''}
+        <div class="md">${HT.medal(r.rank)}</div><div class="av">${esc(r.avatar)}</div><div class="nm">${esc(r.name)}</div>
+        <div class="fl">${r.floors} 🏢</div><div class="acc">${r.correct}/${r.answered} correct</div></div>` : '');
+      const rest = F.ranking.slice(3);
+      const cols = Math.min(5, Math.max(2, Math.ceil(rest.length / 9)));
+      const rows = Math.max(1, Math.ceil(rest.length / cols));
+      const grid = rest.map((r) => `<li><span class="rk">#${r.rank}</span><span class="av">${esc(r.avatar)}</span><span class="nm">${esc(r.name)}</span><span class="fl">${r.floors} 🏢</span></li>`).join('');
+      box.innerHTML = `<div class="end-wrap v2">
+          <div class="end-title"><div><h1>🏆 Final ranking</h1><div class="end-meta">${F.ranking.length} player${F.ranking.length === 1 ? '' : 's'} · class accuracy ${F.accuracy}%</div></div>
+            <div class="end-actions">${actions}</div></div>
+          <div class="hall">${hof(top[1])}${hof(top[0])}${hof(top[2])}</div>
+          ${rest.length ? `<ol class="rank-grid ${rest.length > 30 ? 'dense' : ''}" style="grid-template-columns:repeat(${cols},minmax(0,1fr));grid-template-rows:repeat(${rows},auto)">${grid}</ol>` : ''}
           <div class="awards">
             ${award(aw.builder, '🏗️', 'Master Builder', 'floors built')}
             ${award(aw.destroyer, '💣', 'Top Bomber', 'floors destroyed')}
             ${award(aw.defender, '🛡️', 'Iron Shield', 'damage blocked')}
           </div>
-          <h2 style="margin-top:16px">Leaderboard · class accuracy ${F.accuracy}%</h2>
-          <ol class="board">${board}</ol>
-        </div>
-        <div>
-          <h2>📚 Let's review: most-missed questions</h2>
-          ${missed ? `<ul class="missed">${missed}</ul>` : '<p class="lobby-hint">Nobody missed a question. Impressive!</p>'}
-        </div>
-      </div>`;
+        </div>`;
+    }
+    $('#reviewBtn').onclick = () => { showReview = !showReview; renderFinale(); };
     const again = $('#againBtn');
     if (again) again.onclick = () => socket.emit('host:lobby');
     const nb = $('#newBtn');
@@ -491,6 +560,7 @@
     for (const [id, key, div] of SETTING_FIELDS) $('#' + id).value = Math.round((s[key] / div) * 100) / 100;
     $('#sShuffle').checked = !!s.shuffle;
     $('#sMix').checked = !!s.mix;
+    $('#sRevenge').checked = !!s.revenge;
   }
   function renderGameTab(fresh) {
     $('#pauseBtn').textContent = S.paused ? '▶ Resume' : '⏸ Pause';
@@ -498,7 +568,8 @@
     const note = {
       lobby: 'Skip and End are available once the game has started.',
       intro: `Skip starts Phase ${S.phase} now.`,
-      play: `Skip ends Phase ${S.phase} now${S.phase < 3 ? ' and moves to the next phase' : ' and starts the finale'}.`,
+      play: `Skip ends Phase ${S.phase} now${S.phase < 3 ? ' and moves to the next phase' : S.settings.revenge ? ' and starts the Final Revenge' : ' and starts the finale'}.`,
+      revenge: 'Skip jumps to the next step of the Final Revenge (an unanswered duel ends, the wheel spins by itself). End game skips the rest of the revenge and shows the final ranking.',
       finale: 'Skip jumps to the results.',
       ended: 'The game is over. Use Back to lobby to play again with the same players.'
     }[S.stage] || '';
@@ -513,7 +584,7 @@
   $('#soundBtn').onclick = () => { Sfx.on = !Sfx.on; store.set('ht:sound', Sfx.on); if (Sfx.on) Sfx.pop(); renderGameTab(false); };
   $('#fsBtn').onclick = toggleFullscreen;
   $('#saveSettings').onclick = () => {
-    const settings = { shuffle: $('#sShuffle').checked, mix: $('#sMix').checked };
+    const settings = { shuffle: $('#sShuffle').checked, mix: $('#sMix').checked, revenge: $('#sRevenge').checked };
     for (const [id, key, div] of SETTING_FIELDS) settings[key] = Number($('#' + id).value) * div;
     socket.emit('host:settings', { settings }, (res) => {
       if (!res || !res.ok) return toast('Could not save settings');
@@ -524,7 +595,7 @@
   };
   $('#defaultSettings').onclick = () => {
     store.del('ht:settings3');
-    const d = { p1Sec: 120, p2Sec: 300, p3Sec: 360, finaleSec: 60, introSec: 8, p1QSec: 15, setQSec: 20, wrongSec: 3, throwSec: 5, chooseSec: 5, p1Cap: 18, p2Cap: 9, p3Cap: 10, shuffle: true, mix: true };
+    const d = { p1Sec: 120, p2Sec: 300, p3Sec: 360, finaleSec: 60, introSec: 8, p1QSec: 15, setQSec: 20, wrongSec: 3, throwSec: 5, chooseSec: 5, p1Cap: 18, p2Cap: 9, p3Cap: 10, shuffle: true, mix: true, revenge: true };
     fillSettings(d);
     toast('Defaults loaded: press Save settings');
   };

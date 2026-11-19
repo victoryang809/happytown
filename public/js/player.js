@@ -13,7 +13,9 @@
     bannerN: null,
     bannerUntil: 0,
     seenHit: null, // id of the last bomb hit already shown on this phone
-    lastHitAt: 0
+    lastHitAt: 0,
+    resTab: 'rank', // results screen: rank | hits | review
+    rvAnswer: null // my answer in the current revenge duel { key, choice, correct, ms }
   };
   if (!HT.AVATARS.includes(L.avatar)) L.avatar = HT.AVATARS[Math.floor(Math.random() * HT.AVATARS.length)];
   let S = null; // shared state (town, phase, timers)
@@ -110,6 +112,7 @@
     if (!L.joined) { chrome({}); renderJoin(); return; }
     if (!inGame) return; // joined, waiting for the first update
     $('#pausedOv').hidden = !S.paused;
+    document.body.classList.toggle('rv-mode', S.stage === 'revenge');
     mini.setMe(me.id);
     mini.update(S.players);
     updateHud();
@@ -117,6 +120,7 @@
       case 'lobby': renderLobby(); break;
       case 'intro': renderIntro(); break;
       case 'play': renderPlay(); break;
+      case 'revenge': renderRevenge(); break;
       default: renderEnd(); break;
     }
   }
@@ -125,8 +129,8 @@
     if (!S.phase) return;
     const ph = HT.PHASES[S.phase];
     const chip = $('#hudPhase');
-    chip.className = `chip ${ph.cls}`;
-    chip.textContent = `${ph.icon} P${S.phase} ${ph.short}`;
+    chip.className = `chip ${S.stage === 'revenge' ? 'rv' : ph.cls}`;
+    chip.textContent = S.stage === 'revenge' ? '💀 Final Revenge' : `${ph.icon} P${S.phase} ${ph.short}`;
     $('#hudFloors').textContent = me.floors;
     $('#hudRank').textContent = `#${rankOf(me.id)}/${S.players.length}`;
     const w = me.bomb ? `💣 ${me.bomb.dmg}` : me.arsenal ? `💣 ${me.arsenal.miniStacks ? `${S.rules.p3.mega}+${me.arsenal.mini}` : me.arsenal.dmg}` : '';
@@ -162,6 +166,11 @@
     const frac = total ? Math.max(0, Math.min(1, left / total)) : 0;
     for (const el of document.querySelectorAll('.js-bar')) el.style.width = (frac * 100).toFixed(1) + '%';
     for (const el of document.querySelectorAll('.js-cd')) el.textContent = Math.ceil(left / 1000);
+    if (S.stage === 'revenge' && S.rv) { // revenge steps count down with the step clock
+      const rf = Math.max(0, Math.min(1, pl / (S.rv.ms || 1)));
+      for (const el of document.querySelectorAll('.js-rvbar')) el.style.width = (rf * 100).toFixed(1) + '%';
+      for (const el of document.querySelectorAll('.js-rvcd')) el.textContent = S.paused ? '⏸' : Math.ceil(pl / 1000);
+    }
     const ic = $('#introCd');
     if (ic) ic.textContent = S.paused ? 'Paused' : `Starting in ${Math.ceil(pl / 1000)}s…`;
     const ban = $('#banner');
@@ -536,6 +545,217 @@
       <p class="p-sub">Your questions appear in a moment.</p></div></section>`);
   }
 
+  // ---- Final Revenge ----
+  // Only the avengers and the two players of the current duel use their phone; everyone else
+  // gets a locked screen that points to the big screen.
+  function rvP(id) { return S.players.find((p) => p.id === id) || { id, name: '?', avatar: '❔', color: '#888', floors: 0 }; }
+  const rvName = (p) => `${esc(p.avatar)} <b>${esc(p.name)}</b>`;
+
+  function renderRevenge() {
+    chrome({ hud: true, mini: false });
+    const rv = S.rv;
+    if (!rv) return;
+    const step = rv.step;
+    const mine = rv.cast.find((c) => c.id === me.id);
+    const pr = rv.idx >= 0 && rv.idx < rv.pairs.length ? rv.pairs[rv.idx] : null;
+    const inPair = !!pr && (pr.a === me.id || pr.t === me.id);
+    const foe = inPair ? rvP(pr.a === me.id ? pr.t : pr.a) : null;
+    const chooserId = Object.keys(rv.picks).find((a) => rv.picks[a].targetId === me.id);
+    const myPairIdx = rv.pairs.findIndex((x) => x.a === me.id || x.t === me.id);
+    const roleName = mine ? (mine.role === 'broke' ? '🥫 The Broke Club' : '🩹 Victim of the Year') : '';
+
+    if (['blackout', 'reveal', 'rules'].includes(step)) {
+      if (mine) {
+        rvScreen(`chosen:${step}`, 'chosen', `<div class="rv-emoji shake">😈</div><h2>YOU have been chosen!</h2>
+          <div class="rv-role">${roleName}</div>
+          <p>It's payback time. Watch the big screen, then pick your enemy here. 🎯</p>`, () => buzz([200, 80, 200]));
+      } else rvLockScreen(step, step === 'blackout' ? '🕯️' : '📵', step === 'blackout' ? 'Uh-oh… the lights went out' : 'Phones are locked',
+        step === 'blackout' ? 'Look at the big screen! 👀' : 'Look at the big screen! 👀 Something terrible is about to happen…');
+      return;
+    }
+    if (step === 'pick') {
+      if (mine && !rv.picks[me.id]) { renderRvPicker(rv); return; }
+      if (mine) {
+        const t = rvP(rv.picks[me.id].targetId);
+        rvScreen('pick:done', 'chosen', `<div class="rv-emoji">🎯</div><h2>You chose ${rvName(t)}!</h2>
+          <p>${rv.picks[me.id].auto ? 'Time ran out, so the tallest house left was chosen for you.' : 'Revenge is coming…'} Waiting for the others <b id="rvN"></b></p>`);
+        $('#rvN').textContent = `(${Object.keys(rv.picks).length}/${rv.cast.length})`;
+        return;
+      }
+      if (chooserId) {
+        rvScreen(`pick:target:${chooserId}`, 'doomed', `<div class="rv-emoji shake">😱</div><h2>${rvName(rvP(chooserId))} chose YOU!</h2>
+          <p>Get ready for a reflex duel. Answer faster than them or… 💀</p>`, () => buzz([300, 100, 300, 100, 300]));
+        return;
+      }
+      rvLockScreen('pick', '🙏', 'Phones are locked', 'The avengers are choosing their enemies… pray it\'s not you!');
+      $('#rvSt').textContent = `🎯 ${Object.keys(rv.picks).length}/${rv.cast.length} avengers have chosen`;
+      return;
+    }
+    if (step === 'picked') {
+      if (myPairIdx >= 0) {
+        const x = rv.pairs[myPairIdx];
+        rvScreen('picked:mine', 'chosen', `<div class="rv-emoji">⚔️</div><h2>Your duel: #${myPairIdx + 1} of ${rv.pairs.length}</h2>
+          <p>You vs ${rvName(rvP(x.a === me.id ? x.t : x.a))}. Fastest <b>right</b> answer wins!</p>`);
+      } else rvLockScreen('picked', '⚔️', 'The duels are about to begin', 'Look at the big screen! 👀');
+      return;
+    }
+    if (step === 'outro') { rvLockScreen('outro', '☠️', 'Revenge complete!', 'The final ranking is coming… 🏆'); return; }
+    if (!inPair) {
+      const p = pr ? `⚔️ Duel ${rv.idx + 1} of ${rv.pairs.length}: ${esc(rvP(pr.a).name)} vs ${esc(rvP(pr.t).name)}` : '';
+      rvLockScreen('duels', '📵', 'Phones are locked', 'Look at the big screen! 👀');
+      const later = myPairIdx > rv.idx ? ` · ⏳ your duel is #${myPairIdx + 1}` : '';
+      $('#rvSt').innerHTML = p + later;
+      return;
+    }
+    const d = rv.duel;
+    if (step === 'duelIntro') {
+      rvScreen(`duelIntro:${rv.idx}`, 'chosen', `<div class="rv-emoji">⚔️</div><h2>DUEL! You vs ${rvName(foe)}</h2>
+        <p>One quick question. The fastest <b>right</b> answer spins the wheel. Get ready… <b class="js-rvcd"></b></p>`, () => buzz(120));
+      return;
+    }
+    if (step === 'duel' && d) { renderRvDuel(rv, d, foe); return; }
+    if (step === 'duelResult' && d) {
+      const won = d.winner === me.id;
+      let html;
+      if (won) html = `<div class="rv-emoji">🏆</div><h2>You win! (${(d.answers[me.id].ms / 1000).toFixed(2)} s)</h2><p>Get ready to <b>SPIN</b> the Wheel of Revenge! 🎡</p>`;
+      else if (d.winner) html = `<div class="rv-emoji">😭</div><h2>${rvName(foe)} was faster…</h2><p>Now THEY spin the wheel. Pray for a self-destruct! 🙏</p>`;
+      else if (d.round === 1) html = '<div class="rv-emoji">🔥</div><h2>Nobody got it right!</h2><p>SUDDEN DEATH: one more question. Get ready!</p>';
+      else html = '<div class="rv-emoji">🕊️</div><h2>Nobody got it right again</h2><p>Peace… for now.</p>';
+      rvScreen(`duelResult:${rv.key}`, won ? 'win' : 'chosen', html, () => buzz(won ? [80, 40, 80] : 200));
+      return;
+    }
+    if (step === 'spin' && rv.spin) {
+      if (rv.spin.by === me.id) renderRvSpin(rv);
+      else rvScreen('spin:wait', 'doomed', `<div class="rv-emoji shake">😬</div><h2>${rvName(foe)} is about to spin…</h2><p>Look at the big screen! 👀</p>`);
+      return;
+    }
+    if (step === 'spinning') { rvScreen('spinning', 'chosen', '<div class="rv-emoji spin">🎡</div><h2>The wheel is spinning…</h2><p>Look at the big screen! 👀</p>'); return; }
+    if (step === 'effect') {
+      const r = pr.res || {};
+      let html = '<div class="rv-emoji">🤷</div><h2>Nothing happened</h2>';
+      if (r.victim === me.id && r.outcome === 'self') {
+        html = r.lost ? `<div class="rv-emoji">🤡</div><h2>You blew up your own house!</h2><p>Self-destruct: −${r.lost} floor${r.lost === 1 ? '' : 's'}. Oops.</p>`
+          : '<div class="rv-emoji">🤷</div><h2>Self-destruct!</h2><p>…but your house was already empty. Nothing lost!</p>';
+      } else if (r.victim === me.id && !r.lost) {
+        html = r.absorbed ? `<div class="rv-emoji">🛡️</div><h2>Your shield saved you!</h2><p>It blocked all ${r.absorbed} floors (and is gone now).</p>`
+          : `<div class="rv-emoji">🤷</div><h2>${rvName(foe)} attacked…</h2><p>…but you had nothing left to lose!</p>`;
+      } else if (r.victim === me.id) html = `<div class="rv-emoji">💥</div><h2>${rvName(foe)} got you!</h2><p>${r.outcome === 'missile' ? '🚀 Armor-piercing missile' : '💥 Crushed'}: −${r.lost} floor${r.lost === 1 ? '' : 's'}${r.absorbed ? ` (🛡️ your shield blocked ${r.absorbed})` : ''}</p>`;
+      else if (r.outcome === 'self') html = `<div class="rv-emoji">😅</div><h2>${rvName(foe)} blew up their own house!</h2><p>You are safe. Lucky!</p>`;
+      else if (r.outcome) html = `<div class="rv-emoji">😈</div><h2>Revenge!</h2><p>${rvName(foe)} lost ${r.lost} floor${r.lost === 1 ? '' : 's'}${r.absorbed ? ` (their shield blocked ${r.absorbed})` : ''}.</p>`;
+      rvScreen(`effect:${rv.idx}`, r.victim === me.id ? 'doomed' : 'win', html);
+    }
+  }
+
+  function buzz(pattern) { if (navigator.vibrate) navigator.vibrate(pattern); }
+
+  function rvScreen(key, cls, inner, after) {
+    setScreen(`rv:${S.rv.key}:${key}`, `<section class="rv-big ${cls}"><div class="rv-box">${inner}</div></section>`, after);
+  }
+  function rvLockScreen(key, icon, title, sub) {
+    setScreen(`rv:${S.rv.key}:lock:${key}`, `<section class="rv-big lock"><div class="rv-box"><div class="rv-emoji">${icon}</div><h2>${esc(title)}</h2><p>${esc(sub)}</p><div class="rv-st" id="rvSt"></div></div></section>`);
+  }
+
+  function renderRvPicker(rv) {
+    const fresh = setScreen(`rv:${rv.key}:picker`, `
+      <section class="rv-pickp">
+        <div class="hd"><div>🎯 Choose your enemy!</div><div class="cd-pill"><b class="js-rvcd"></b>s</div></div>
+        <div class="cbar red"><i class="js-rvbar"></i></div>
+        <div class="rv-grid" id="rvGrid"></div>
+        <p class="rv-hint">One enemy each, no two the same. No choice in time = the tallest house left.</p>
+      </section>`, () => {
+      buzz([100, 50, 100]);
+      $('#rvGrid').onclick = (e) => {
+        const b = e.target.closest('[data-t]');
+        if (!b || L.busy || S.paused || b.classList.contains('taken')) return;
+        L.busy = true;
+        b.classList.add('picked');
+        socket.emit('rv:pick', { targetId: b.dataset.t }, (res) => {
+          L.busy = false;
+          if (!res || !res.ok) {
+            b.classList.remove('picked');
+            if (res && res.error === 'taken') toast('Too slow, someone took that house! Pick another one.', 'meh');
+          } else buzz(60);
+        });
+      };
+    });
+    const taken = new Map(Object.entries(rv.picks).map(([a, x]) => [x.targetId, a]));
+    const castIds = new Set(rv.cast.map((c) => c.id));
+    const list = HT.ranked(S.players.filter((p) => !castIds.has(p.id)));
+    const fp = JSON.stringify(rv.picks) + list.map((p) => p.id + p.floors).join(',');
+    const grid = $('#rvGrid');
+    if (!grid || (!fresh && grid.dataset.fp === fp)) return;
+    grid.dataset.fp = fp;
+    grid.innerHTML = list.map((p) => {
+      const by = taken.get(p.id);
+      return `<button class="rv-t ${by ? 'taken' : ''}" data-t="${p.id}" style="--c:${p.color}"><span class="av">${esc(p.avatar)}</span>
+        <span class="nm">${esc(p.name)}</span><span class="fl">${by ? `<span class="tk">🎯 ${esc(rvP(by).name)}</span>` : `🏢 ${p.floors}${p.shield ? ` 🛡️${p.shield}` : ''}`}</span></button>`;
+    }).join('');
+  }
+
+  function renderRvDuel(rv, d, foe) {
+    if (!L.rvAnswer || L.rvAnswer.key !== rv.key) L.rvAnswer = null;
+    // after a reload the server still knows my answer (but not which button it was)
+    if (!L.rvAnswer && d.answers[me.id]) L.rvAnswer = { key: rv.key, choice: -1, correct: d.answers[me.id].correct, ms: d.answers[me.id].ms };
+    const fresh = setScreen(`rv:${rv.key}:duel`, `
+      <section class="rv-duelp">
+        <div class="qbox">
+          <div class="rv-tag">⚔️ vs ${rvName(foe)}${d.round === 2 ? ' · 🔥 SUDDEN DEATH' : ''}</div>
+          <div class="qt">${esc(d.text)}</div>
+          <div class="q-timer"><i class="js-rvbar"></i></div>
+          <div class="rv-msg" id="rvMsg">Fastest <b>right</b> answer wins! ⚡</div>
+        </div>
+        <div class="rv-ops" id="rvOps">${d.options.map((o, i) => `<button class="rv-op o${i}" data-i="${i}">${esc(o)}</button>`).join('')}</div>
+      </section>`, () => {
+      buzz(80);
+      $('#rvOps').onclick = (e) => {
+        const b = e.target.closest('[data-i]');
+        if (!b || L.busy || L.rvAnswer || S.paused) return;
+        L.busy = true;
+        b.classList.add('picked');
+        $('#rvOps').classList.add('answered');
+        const key = rv.key;
+        socket.emit('rv:answer', { key, choice: Number(b.dataset.i) }, (res) => {
+          L.busy = false;
+          if (!res || !res.ok) { if (S.rv && S.rv.key === key) { b.classList.remove('picked'); $('#rvOps').classList.remove('answered'); } return; }
+          L.rvAnswer = { key, choice: Number(b.dataset.i), correct: res.correct, ms: res.ms };
+          buzz(res.correct ? 40 : [60, 40, 60]);
+          render(); // a right answer ends the duel: the result screen may already be here
+        });
+      };
+    });
+    const ops = $('#rvOps');
+    if (L.rvAnswer && ops) { // keep my answer marked
+      ops.classList.add('answered');
+      const mineBtn = ops.querySelector(`[data-i="${L.rvAnswer.choice}"]`);
+      if (mineBtn) mineBtn.classList.add('picked', L.rvAnswer.correct ? 'right' : 'wrong');
+    }
+    const msg = $('#rvMsg');
+    if (!msg) return;
+    const theirs = d.answers[foe.id];
+    let html = 'Fastest <b>right</b> answer wins! ⚡';
+    if (L.rvAnswer) html = L.rvAnswer.correct ? `✅ Right! ${(L.rvAnswer.ms / 1000).toFixed(2)} s` : `❌ Wrong!${theirs ? '' : ` Now pray ${esc(foe.name)} gets it wrong too… 🙏`}`;
+    else if (theirs && !theirs.correct) html = `❌ ${esc(foe.name)} answered wrong. Your chance! ⚡`;
+    if (fresh || msg.dataset.h !== html) { msg.innerHTML = html; msg.dataset.h = html; }
+  }
+
+  function renderRvSpin(rv) {
+    setScreen(`rv:${rv.key}:spin`, `
+      <section class="rv-big win"><div class="rv-box">
+        <p class="rv-k">🏆 You won the duel! Spin the Wheel of Revenge:</p>
+        <button class="spin-btn" id="spinBtn">🎡 SPIN!</button>
+        <p class="rv-k small">auto-spin in <b class="js-rvcd"></b> s</p>
+      </div></section>`, () => {
+      buzz([60, 30, 60]);
+      $('#spinBtn').onclick = () => {
+        if (L.busy || S.paused) return;
+        L.busy = true;
+        $('#spinBtn').classList.add('picked');
+        buzz(150);
+        socket.emit('rv:spin', null, () => { L.busy = false; });
+      };
+    });
+  }
+
   // ---- Finale & results ----
   // For the first 12 seconds of the finale the big screen reveals the podium, so phones say "look up".
   function inFinaleReveal() {
@@ -557,7 +777,7 @@
     const top = S.final.ranking.slice(0, 3);
     const acc = me.stats.answered ? Math.round((100 * me.stats.correct) / me.stats.answered) : 0;
     const missed = F.missed || [];
-    setScreen(`end:${S.stage}`, `
+    const fresh = setScreen(`end:${S.stage}:${S.final.ranking.length}`, `
       <section class="results">
         <div class="res-left">
           <div class="card center">
@@ -569,14 +789,37 @@
           <div class="card podium-sm">${top.map((r) => `<div><span>${HT.medal(r.rank)}</span><span>${esc(r.avatar)}</span><span class="nm">${esc(r.name)}</span><span class="fl">${r.floors} 🏢</span></div>`).join('')}</div>
         </div>
         <div class="res-right card">
-          ${hitsSummary(me.hits || [], '💥 Who bombed you') || '<p class="p-sub">💥 Nobody bombed your house. Lucky you!</p>'}
-          <div class="p-title small" style="margin-top:12px">📚 Your review list</div>
-          ${missed.length ? `<ul class="recap">${missed.map((m) => `<li class="${m.fixed ? 'fixed' : 'no'}"><span class="mk">${m.fixed ? '🔁✅' : '❌'}</span>
-            <b>${esc(m.q)}</b><span class="a">✓ ${esc(m.answer)}</span>${m.explain ? `<span class="x">${esc(m.explain)}</span>` : ''}</li>`).join('')}</ul>
-            <p class="p-sub tiny">🔁✅ = you missed it at first but got it right later.</p>`
+          <div class="res-tabs" id="resTabs">
+            <button data-tab="rank">🏆 Ranking</button>
+            <button data-tab="hits">💥 Bombed by</button>
+            <button data-tab="review">📚 Review <small>(optional)</small></button>
+          </div>
+          <div data-pane="rank"><ol class="rank-list">${S.final.ranking.map((r) => `<li class="${r.id === me.id ? 'me' : r.rank <= 3 ? 'top' : ''}">
+            <span class="rk">${r.rank <= 3 ? HT.medal(r.rank) : `#${r.rank}`}</span><span>${esc(r.avatar)}</span><span class="nm">${esc(r.name)}${r.id === me.id ? ' (you)' : ''}</span><span class="fl">${r.floors} 🏢</span></li>`).join('')}</ol></div>
+          <div data-pane="hits">${hitsSummary(me.hits || [], '💥 Who bombed you') || '<p class="p-sub">💥 Nobody bombed your house. Lucky you!</p>'}</div>
+          <div data-pane="review">
+            <div class="rv-skip"><span class="p-title small">📚 Your review list</span><button class="btn small ghost" id="skipReview">Skip ✕</button></div>
+            ${missed.length ? `<ul class="recap">${missed.map((m) => `<li class="${m.fixed ? 'fixed' : 'no'}"><span class="mk">${m.fixed ? '🔁✅' : '❌'}</span>
+              <b>${esc(m.q)}</b><span class="a">✓ ${esc(m.answer)}</span>${m.explain ? `<span class="x">${esc(m.explain)}</span>` : ''}</li>`).join('')}</ul>
+              <p class="p-sub tiny">🔁✅ = you missed it at first but got it right later.</p>`
         : '<p class="p-sub">You didn\'t miss a single question. Brilliant! 🌟</p>'}
+          </div>
         </div>
-      </section>`);
+      </section>`, () => {
+      $('#resTabs').onclick = (e) => { const b = e.target.closest('[data-tab]'); if (b) { L.resTab = b.dataset.tab; showResTab(); } };
+      $('#skipReview').onclick = () => { L.resTab = 'rank'; showResTab(); };
+    });
+    if (fresh) showResTab();
+  }
+
+  function showResTab() {
+    document.querySelectorAll('#resTabs [data-tab]').forEach((b) => b.classList.toggle('on', b.dataset.tab === L.resTab));
+    document.querySelectorAll('.res-right [data-pane]').forEach((p) => { p.hidden = p.dataset.pane !== L.resTab; });
+    const meRow = document.querySelector('.rank-list li.me');
+    const box = document.querySelector('.res-right');
+    if (L.resTab === 'rank' && meRow && box) { // show my own row in the middle of the list
+      box.scrollTop = Math.max(0, meRow.getBoundingClientRect().top - box.getBoundingClientRect().top + box.scrollTop - box.clientHeight / 2);
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -586,9 +829,9 @@
     if (!L.joined || !me) return;
     if (ev.type === 'attack') {
       if (document.body.classList.contains('show-mini')) mini.attack(ev);
-      if (ev.from === me.id) {
+      if (ev.from === me.id && !ev.self) {
         const what = ev.lost > 0 ? `−${ev.lost}` : ev.absorbed ? 'blocked by a shield' : 'no floors left';
-        toast(`🎯 ${ev.kind === 'mega' ? 'Mega' : ev.kind === 'mini' ? 'Mini' : 'Bomb'} hit ${ev.toName}: ${what}${ev.auto ? ' (auto-aimed)' : ''}`, ev.lost > 0 ? 'good' : 'meh');
+        toast(`🎯 ${{ mega: 'Mega', mini: 'Mini', crush: 'Your revenge', missile: 'Your missile' }[ev.kind] || 'Bomb'} hit ${ev.toName}: ${what}${ev.auto ? ' (auto-aimed)' : ''}`, ev.lost > 0 ? 'good' : 'meh');
       }
     }
     if (ev.type === 'fizzle' && ev.id === me.id) {
@@ -602,7 +845,7 @@
   // always shows who threw it: one card per bomb (several can be on screen at once), and a
   // summary of what happened while the phone was offline.
   // -------------------------------------------------------------------------
-  const kindName = (k) => (k === 'mega' ? 'Mega Bomb' : k === 'mini' ? 'Mini Bomb' : 'Bomb');
+  const kindName = (k) => ({ mega: 'Mega Bomb', mini: 'Mini Bomb', crush: 'Revenge crush (−80%)', missile: 'Armor-piercing missile', self: 'Self-destruct' }[k] || 'Bomb');
   const seenKey = () => `ht:seenHit:${L.session ? L.session.token : ''}`;
 
   function checkHits() {
@@ -644,7 +887,9 @@
 
   function showHit(h) {
     const who = `<b>${esc(h.fromName)}</b>`;
-    if (h.lost > 0) {
+    if (h.self) {
+      hitCard('bad', '🧨', `You blew up your own house! 🤡<small>Self-destruct · −${h.lost} floor${h.lost === 1 ? '' : 's'}</small>`, 6000);
+    } else if (h.lost > 0) {
       hitCard('bad', h.fromAvatar, `💥 ${who} bombed you!<small>${kindName(h.kind)} · −${h.lost} floor${h.lost > 1 ? 's' : ''}${h.absorbed ? ` · 🛡️ blocked ${h.absorbed}` : ''}</small>`, 5500);
     } else if (h.absorbed > 0) {
       hitCard('blue', h.fromAvatar, `🛡️ Your shield blocked ${who}'s ${kindName(h.kind)}!<small>Blocked ${h.absorbed} · the shield is used up</small>`, 5500);
@@ -657,9 +902,10 @@
   function groupHits(hits) {
     const by = new Map();
     for (const h of hits) {
-      const x = by.get(h.fromName) || { name: h.fromName, avatar: h.fromAvatar, n: 0, lost: 0, blocked: 0 };
+      const name = h.self ? 'Yourself (self-destruct)' : h.fromName;
+      const x = by.get(name) || { name, avatar: h.self ? '🧨' : h.fromAvatar, n: 0, lost: 0, blocked: 0 };
       x.n += 1; x.lost += h.lost; x.blocked += h.absorbed;
-      by.set(h.fromName, x);
+      by.set(name, x);
     }
     return [...by.values()].sort((a, b) => b.lost - a.lost || b.n - a.n);
   }

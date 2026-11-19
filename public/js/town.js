@@ -8,12 +8,19 @@
     svg(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 40" preserveAspectRatio="none"><rect x="10" y="10" width="18" height="18" rx="2" fill="${WIN}"/><rect x="41" y="10" width="18" height="18" rx="2" fill="${WIN}"/><rect x="72" y="10" width="18" height="18" rx="2" fill="${WIN}"/>${LINE}</svg>`),
     svg(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 40" preserveAspectRatio="none"><rect x="16" y="9" width="68" height="20" rx="2" fill="${WIN}"/><rect x="49" y="9" width="2" height="20" fill="rgba(0,0,0,0.12)"/>${LINE}</svg>`)
   ];
+  // Final Revenge projectiles. `orient`: the direction the emoji points to (degrees, screen
+  // coordinates), so it can be turned along its flight path. `drop`: falls from the sky.
+  const PROJ = {
+    crush: { e: '☄️', orient: 135, cls: 'huge', dur: 1500 },
+    missile: { e: '🚀', orient: -45, cls: 'huge', dur: 1500 },
+    self: { e: '🧨', cls: 'big', drop: true, dur: 1200 }
+  };
   const TINY = svg(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 40" preserveAspectRatio="none"><rect x="20" y="12" width="60" height="14" fill="rgba(255,241,179,0.75)"/>${LINE}</svg>`);
 
   class Town {
     constructor(el, opts) {
       this.el = el;
-      this.opts = Object.assign({ compact: false, meId: null, sky: true, onImpact: null, onBuild: null }, opts || {});
+      this.opts = Object.assign({ compact: false, meId: null, sky: true, maxW: 0, onImpact: null, onBuild: null }, opts || {});
       el.classList.add('town');
       if (this.opts.compact) el.classList.add('town-compact');
       if (this.opts.sky) {
@@ -125,7 +132,7 @@
       if (!W || !H) return;
       const compact = this.opts.compact;
       const N = Math.max(1, this.players.length);
-      const maxW = compact ? 64 : 170;
+      const maxW = this.opts.maxW || (compact ? 64 : 170);
       const minW = compact ? 30 : 64;
       let best = null;
       for (let r = 1; r <= Math.min(N, 6); r++) {
@@ -208,8 +215,10 @@
       this.pending.set(ev.to, queue);
       if (queue.length === 1) this.override.set(ev.to, ev.before);
       if (ev.absorbed > 0) this.shieldHold.set(ev.to, (this.shieldHold.get(ev.to) || 0) + 1);
-      const a = this.roofPoint(ev.from);
+      const spec = PROJ[ev.kind] || null;
       const b = this.roofPoint(ev.to);
+      let a = this.roofPoint(ev.from);
+      if (spec && b && (spec.drop || ev.from === ev.to)) a = { x: b.x + 30, y: Math.max(10, b.y - 420) };
       const finish = () => {
         const q = this.pending.get(ev.to) || [];
         const i = q.indexOf(ev);
@@ -237,28 +246,34 @@
       };
       const visible = this.el.offsetParent !== null && this.el.getBoundingClientRect().width > 0;
       if (!a || !b || !visible) { finish(); return; }
-      const big = ev.kind === 'mega' || ev.dmg >= 5;
+      const big = ev.kind === 'mega' || ev.dmg >= 5 || !!spec;
       const proj = document.createElement('div');
-      proj.className = 'projectile' + (this.opts.compact ? ' small' : big ? ' big' : ev.kind === 'mini' ? ' proj-mini' : '');
-      proj.textContent = '💣';
+      proj.className = 'projectile' + (this.opts.compact ? ' small' : spec ? ` ${spec.cls} k-${ev.kind}` : big ? ' big' : ev.kind === 'mini' ? ' proj-mini' : '');
+      proj.textContent = spec ? spec.e : '💣';
       document.body.appendChild(proj);
       const dist = Math.hypot(b.x - a.x, b.y - a.y);
-      const arc = Math.max(80, Math.min(320, dist * 0.45)) * (this.opts.compact ? 0.6 : 1);
+      const arc = spec && spec.drop ? 0 : Math.max(80, Math.min(320, dist * (spec ? 0.32 : 0.45))) * (this.opts.compact ? 0.6 : 1);
       const frames = [];
       for (let i = 0; i <= 24; i++) {
         const t = i / 24;
         const x = a.x + (b.x - a.x) * t;
         const y = a.y + (b.y - a.y) * t - arc * 4 * t * (1 - t);
-        frames.push({ transform: `translate(${x}px, ${y}px) translate(-50%, -50%) rotate(${t * 520}deg) scale(${1 + 0.35 * Math.sin(Math.PI * t)})` });
+        let rot = t * 520;
+        if (spec && spec.orient !== undefined) { // point along the flight path
+          const dx = b.x - a.x;
+          const dy = b.y - a.y - arc * 4 * (1 - 2 * t);
+          rot = (Math.atan2(dy, dx) * 180) / Math.PI - spec.orient;
+        } else if (spec && spec.drop) rot = Math.sin(t * Math.PI * 6) * 25;
+        frames.push({ transform: `translate(${x}px, ${y}px) translate(-50%, -50%) rotate(${rot}deg) scale(${1 + 0.35 * Math.sin(Math.PI * t)})` });
       }
-      const dur = this.opts.compact ? 700 : Math.max(750, Math.min(1300, 500 + dist * 0.8));
+      const dur = this.opts.compact ? 700 : spec ? spec.dur : Math.max(750, Math.min(1300, 500 + dist * 0.8));
       const anim = proj.animate(frames, { duration: dur, easing: 'cubic-bezier(.45,.05,.55,.95)' });
       let done = false;
       const land = () => {
         if (done) return;
         done = true;
         proj.remove();
-        this.explode(b, big, ev.absorbed > 0 && ev.lost === 0, target.el.style.getPropertyValue('--c'));
+        this.explode(b, spec ? 'huge' : big, ev.absorbed > 0 && ev.lost === 0, target.el.style.getPropertyValue('--c'));
         finish();
       };
       anim.onfinish = land;
@@ -267,16 +282,16 @@
 
     explode(pt, big, blocked, color) {
       const ex = document.createElement('div');
-      ex.className = 'explosion' + (this.opts.compact ? ' small' : big ? ' big' : '') + (blocked ? ' blocked' : '');
+      ex.className = 'explosion' + (this.opts.compact ? ' small' : big === 'huge' ? ' big huge' : big ? ' big' : '') + (blocked ? ' blocked' : '');
       ex.style.left = pt.x + 'px';
       ex.style.top = pt.y + 'px';
       ex.innerHTML = `<span>${blocked ? '✨' : '💥'}</span>`;
       if (!blocked) {
-        const n = this.opts.compact ? 6 : big ? 14 : 9;
+        const n = this.opts.compact ? 6 : big === 'huge' ? 26 : big ? 14 : 9;
         for (let i = 0; i < n; i++) {
           const d = document.createElement('i');
           const ang = (Math.PI * 2 * i) / n + Math.random() * 0.5;
-          const r = this.opts.compact ? 25 + Math.random() * 15 : (big ? 90 : 60) + Math.random() * 40;
+          const r = this.opts.compact ? 25 + Math.random() * 15 : (big === 'huge' ? 170 : big ? 90 : 60) + Math.random() * 40;
           d.style.setProperty('--dx', Math.cos(ang) * r + 'px');
           d.style.setProperty('--dy', Math.sin(ang) * r - 30 + 'px');
           d.style.background = i % 3 === 0 ? '#ffb703' : color || '#888';
